@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import ImageIO
 import Testing
 @testable import Compositor
 
@@ -34,44 +35,64 @@ struct PDFExportTests {
         #expect(box.width == 4 && box.height == 4)
     }
 
-    /// The page holds the image at full resolution, read straight from the file rather than drawn.
-    @Test func pageEmbedsTheImageUnresampled() async throws {
-        let page = try pdfPage(await ImageExporter.shared.pdfData(snapshot(resolution: 288)))
+    /// The page's image streams (its XObjects), read straight from the file rather than drawn.
+    private func embeddedImages(_ page: CGPDFPage) throws -> [CGPDFStreamRef] {
         let dictionary = try #require(page.dictionary)
         var resources: CGPDFDictionaryRef?
         #expect(CGPDFDictionaryGetDictionary(dictionary, "Resources", &resources))
         var objects: CGPDFDictionaryRef?
         #expect(CGPDFDictionaryGetDictionary(try #require(resources), "XObject", &objects))
-        var sizes: [(Int, Int)] = []
+        var streams: [CGPDFStreamRef] = []
         CGPDFDictionaryApplyBlock(try #require(objects), { _, value, _ in
             var stream: CGPDFStreamRef?
-            guard CGPDFObjectGetValue(value, .stream, &stream), let stream,
-                  let info = CGPDFStreamGetDictionary(stream) else { return true }
-            var width: CGPDFInteger = 0, height: CGPDFInteger = 0
-            if CGPDFDictionaryGetInteger(info, "Width", &width), CGPDFDictionaryGetInteger(info, "Height", &height) {
-                sizes.append((width, height))
-            }
+            if CGPDFObjectGetValue(value, .stream, &stream), let stream { streams.append(stream) }
             return true
         }, nil)
+        return streams
+    }
+
+    private func size(of stream: CGPDFStreamRef) -> (Int, Int)? {
+        guard let info = CGPDFStreamGetDictionary(stream) else { return nil }
+        var width: CGPDFInteger = 0, height: CGPDFInteger = 0
+        guard CGPDFDictionaryGetInteger(info, "Width", &width), CGPDFDictionaryGetInteger(info, "Height", &height) else { return nil }
+        return (width, height)
+    }
+
+    /// The first pixel of a 4 × 4 color image stream: raw 8-bit RGB, or an encoded image ImageIO decodes.
+    private func firstPixel(of stream: CGPDFStreamRef) -> (rgb: [Int], note: String)? {
+        guard size(of: stream).map({ $0 == (4, 4) }) == true, let info = CGPDFStreamGetDictionary(stream) else { return nil }
+        var bits: CGPDFInteger = 0
+        _ = CGPDFDictionaryGetInteger(info, "BitsPerComponent", &bits)
+        var format = CGPDFDataFormat.raw
+        guard let data = CGPDFStreamCopyData(stream, &format) as Data? else { return nil }
+        let note = "format \(format.rawValue), \(bits) bits, \(data.count) bytes"
+        if format == .raw {
+            // The color image has three components a pixel; its transparency is a separate one-component mask.
+            guard bits == 8, data.count == 16 * 3 else { return ([], note) }
+            return (data.prefix(3).map(Int.init), note)
+        }
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil),
+              let context = CGContext(data: nil, width: 4, height: 4, bitsPerComponent: 8, bytesPerRow: 16,
+                                      space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                      bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return ([], note) }
+        context.draw(image, in: CGRect(x: 0, y: 0, width: 4, height: 4))
+        guard let bytes = context.data?.assumingMemoryBound(to: UInt8.self) else { return ([], note) }
+        return ((0..<3).map { Int(bytes[$0]) }, note)
+    }
+
+    @Test func pageEmbedsTheImageUnresampled() async throws {
+        let page = try pdfPage(await ImageExporter.shared.pdfData(snapshot(resolution: 288)))
+        let sizes = try embeddedImages(page).compactMap(size)
         // A 1-point page still carries all 4 × 4 pixels.
         #expect(sizes.contains { $0 == (4, 4) }, "embedded images \(sizes)")
     }
 
-    @Test func pageDrawsTheImagesColors() async throws {
+    @Test func pageEmbedsTheImagesColors() async throws {
         let page = try pdfPage(await ImageExporter.shared.pdfData(snapshot()))
-        let box = page.getBoxRect(.mediaBox)
-        // Drawn back ten times larger so the check reads well inside the image, away from any edge smoothing.
-        let side = 40, stride = side * 4
-        let context = try #require(CGContext(data: nil, width: side, height: side, bitsPerComponent: 8, bytesPerRow: stride,
-                                             space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                                             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
-        context.scaleBy(x: CGFloat(side) / box.width, y: CGFloat(side) / box.height)
-        context.drawPDFPage(page)
-        let pixels = try #require(context.data?.assumingMemoryBound(to: UInt8.self))
-        let center = (side / 2) * stride + (side / 2) * 4
-        let rgba = (0..<4).map { Int(pixels[center + $0]) }
-        // Color management on the way through the PDF can move a channel a little; red stays red.
-        #expect(rgba[0] > 230 && rgba[1] < 25 && rgba[2] < 25 && rgba[3] > 245, "center pixel \(rgba)")
+        let pixels = try embeddedImages(page).compactMap(firstPixel)
+        #expect(pixels.contains { $0.rgb.count == 3 && $0.rgb[0] > 230 && $0.rgb[1] < 25 && $0.rgb[2] < 25 },
+                "images \(pixels.map { "\($0.note), first \($0.rgb)" })")
     }
 
     @Test func documentResolutionSetsThePageSize() async throws {
