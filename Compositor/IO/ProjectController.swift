@@ -61,6 +61,42 @@ final class ProjectController {
         catch { await showError("Couldn’t export PNG", error: error) }
     }
 
+    /// A layered Photoshop copy for handing the work on. The project stays the working file: Photoshop can't hold
+    /// everything Compositor does, so what it can't is flattened or left out, and listed afterwards.
+    func exportPSD() async {
+        guard session.document != nil, begin() else { return }
+        defer { session.isProjectBusy = false }
+        guard let snapshot = session.projectSnapshot() else { return }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.photoshopImage]
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        panel.title = "Export Photoshop"
+        panel.nameFieldStringValue = (session.projectURL?.deletingPathExtension().lastPathComponent ?? "Untitled") + ".psd"
+        let response: NSApplication.ModalResponse
+        if let window { response = await panel.beginSheetModal(for: window) }
+        else { response = await panel.begin() }
+        guard response == .OK, let url = panel.url else { return }
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        do {
+            let exported = try await ImageExporter.shared.psd(snapshot)
+            try await ImageExporter.shared.write(exported.data, to: url)
+            if !exported.notes.isEmpty { await showConversions(exported.notes) }
+        } catch { await showError("Couldn’t export Photoshop file", error: error) }
+    }
+
+    private func showConversions(_ notes: [PSDConversion]) async {
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "Photoshop file exported"
+        let shown = notes.prefix(12).map { "• \($0.layerName): \($0.message)" }
+        let more = notes.count > shown.count ? ["…and \(notes.count - shown.count) more."] : []
+        alert.informativeText = "Photoshop can’t hold some of this project as Compositor does:\n\n" + (shown + more).joined(separator: "\n")
+        alert.addButton(withTitle: "OK")
+        _ = await show(alert)
+    }
+
     func canvasSize() async {
         guard let window, let document = session.document, begin() else { return }
         defer { session.isProjectBusy = false }
