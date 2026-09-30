@@ -27,12 +27,39 @@ struct PDFExportTests {
         return try #require(document.page(at: 1))
     }
 
-    @Test func pageIsAsBigAsTheImagePrintsAndHoldsItsPixels() async throws {
+    @Test func pageIsAsBigAsTheImagePrints() async throws {
         let data = try await ImageExporter.shared.pdfData(snapshot())
         #expect(data.prefix(5) == Data("%PDF-".utf8))
-        let page = try pdfPage(data)
-        let box = page.getBoxRect(.mediaBox)
+        let box = try pdfPage(data).getBoxRect(.mediaBox)
         #expect(box.width == 4 && box.height == 4)
+    }
+
+    /// The page holds the image at full resolution, read straight from the file rather than drawn.
+    @Test func pageEmbedsTheImageUnresampled() async throws {
+        let page = try pdfPage(await ImageExporter.shared.pdfData(snapshot(resolution: 288)))
+        let dictionary = try #require(page.dictionary)
+        var resources: CGPDFDictionaryRef?
+        #expect(CGPDFDictionaryGetDictionary(dictionary, "Resources", &resources))
+        var objects: CGPDFDictionaryRef?
+        #expect(CGPDFDictionaryGetDictionary(try #require(resources), "XObject", &objects))
+        var sizes: [(Int, Int)] = []
+        CGPDFDictionaryApplyBlock(try #require(objects), { _, value, _ in
+            var stream: CGPDFStreamRef?
+            guard CGPDFObjectGetValue(value, .stream, &stream), let stream,
+                  let info = CGPDFStreamGetDictionary(stream) else { return true }
+            var width: CGPDFInteger = 0, height: CGPDFInteger = 0
+            if CGPDFDictionaryGetInteger(info, "Width", &width), CGPDFDictionaryGetInteger(info, "Height", &height) {
+                sizes.append((width, height))
+            }
+            return true
+        }, nil)
+        // A 1-point page still carries all 4 × 4 pixels.
+        #expect(sizes.contains { $0 == (4, 4) }, "embedded images \(sizes)")
+    }
+
+    @Test func pageDrawsTheImagesColors() async throws {
+        let page = try pdfPage(await ImageExporter.shared.pdfData(snapshot()))
+        let box = page.getBoxRect(.mediaBox)
         // Drawn back ten times larger so the check reads well inside the image, away from any edge smoothing.
         let side = 40, stride = side * 4
         let context = try #require(CGContext(data: nil, width: side, height: side, bitsPerComponent: 8, bytesPerRow: stride,
