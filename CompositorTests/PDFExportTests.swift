@@ -1,4 +1,5 @@
 import CoreGraphics
+import Foundation
 import Testing
 @testable import Compositor
 
@@ -20,7 +21,7 @@ struct PDFExportTests {
         return ProjectSnapshot(manifest: manifest, images: red ? [id: ImportedImage(image: image, thumbnail: image, name: "Red")] : [:])
     }
 
-    private func page(_ data: Data) throws -> CGPDFPage {
+    private func pdfPage(_ data: Data) throws -> CGPDFPage {
         let document = try #require(CGDataProvider(data: data as CFData).flatMap { CGPDFDocument($0) })
         #expect(document.numberOfPages == 1)
         return try #require(document.page(at: 1))
@@ -29,7 +30,7 @@ struct PDFExportTests {
     @Test func pageIsAsBigAsTheImagePrintsAndHoldsItsPixels() async throws {
         let data = try await ImageExporter.shared.pdfData(snapshot())
         #expect(data.prefix(5) == Data("%PDF-".utf8))
-        let page = try page(data)
+        let page = try pdfPage(data)
         let box = page.getBoxRect(.mediaBox)
         #expect(box.width == 4 && box.height == 4)
         let context = try #require(CGContext(data: nil, width: 4, height: 4, bitsPerComponent: 8, bytesPerRow: 16,
@@ -43,22 +44,22 @@ struct PDFExportTests {
 
     @Test func documentResolutionSetsThePageSize() async throws {
         // 4 px at 144 pixels/inch is 2 inches' worth of half: 2 points.
-        let box = try page(await ImageExporter.shared.pdfData(snapshot(resolution: 144))).getBoxRect(.mediaBox)
+        let box = try pdfPage(await ImageExporter.shared.pdfData(snapshot(resolution: 144))).getBoxRect(.mediaBox)
         #expect(box.width == 2 && box.height == 2)
         // 4 px at 288 pixels/inch is 1 point.
-        let smaller = try page(await ImageExporter.shared.pdfData(snapshot(resolution: 288))).getBoxRect(.mediaBox)
+        let smaller = try pdfPage(await ImageExporter.shared.pdfData(snapshot(resolution: 288))).getBoxRect(.mediaBox)
         #expect(smaller.width == 1 && smaller.height == 1)
     }
 
     @Test func aPageNeverPassesTheViewersLimit() async throws {
         let big = try snapshot(width: 20_000, height: 100, red: false)
-        let box = try page(await ImageExporter.shared.pdfData(big)).getBoxRect(.mediaBox)
+        let box = try pdfPage(await ImageExporter.shared.pdfData(big)).getBoxRect(.mediaBox)
         #expect(box.width <= ImageExporter.maxPDFPoints + 0.001)
         // Only the page shrinks; the aspect ratio holds.
         #expect(abs(box.width / box.height - 200) < 0.01)
     }
 
     @Test func aBlankCanvasStillMakesAPage() async throws {
-        _ = try page(await ImageExporter.shared.pdfData(snapshot(width: 3, height: 2, red: false)))
+        _ = try pdfPage(await ImageExporter.shared.pdfData(snapshot(width: 3, height: 2, red: false)))
     }
 }
