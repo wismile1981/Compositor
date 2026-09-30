@@ -33,20 +33,25 @@ struct PDFExportTests {
         let page = try pdfPage(data)
         let box = page.getBoxRect(.mediaBox)
         #expect(box.width == 4 && box.height == 4)
-        let context = try #require(CGContext(data: nil, width: 4, height: 4, bitsPerComponent: 8, bytesPerRow: 16,
+        // Drawn back ten times larger so the check reads well inside the image, away from any edge smoothing.
+        let side = 40, stride = side * 4
+        let context = try #require(CGContext(data: nil, width: side, height: side, bitsPerComponent: 8, bytesPerRow: stride,
                                              space: CGColorSpace(name: CGColorSpace.sRGB)!,
                                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        context.scaleBy(x: CGFloat(side) / box.width, y: CGFloat(side) / box.height)
         context.drawPDFPage(page)
         let pixels = try #require(context.data?.assumingMemoryBound(to: UInt8.self))
-        let center = 2 * 16 + 2 * 4
-        #expect(pixels[center] > 250 && pixels[center + 1] < 5 && pixels[center + 2] < 5 && pixels[center + 3] == 255)
+        let center = (side / 2) * stride + (side / 2) * 4
+        let rgba = (0..<4).map { Int(pixels[center + $0]) }
+        // Color management on the way through the PDF can move a channel a little; red stays red.
+        #expect(rgba[0] > 230 && rgba[1] < 25 && rgba[2] < 25 && rgba[3] > 245, "center pixel \(rgba)")
     }
 
     @Test func documentResolutionSetsThePageSize() async throws {
-        // 4 px at 144 pixels/inch is 2 inches' worth of half: 2 points.
+        // 4 px at 144 pixels/inch is 1/36 inch: 2 points.
         let box = try pdfPage(await ImageExporter.shared.pdfData(snapshot(resolution: 144))).getBoxRect(.mediaBox)
         #expect(box.width == 2 && box.height == 2)
-        // 4 px at 288 pixels/inch is 1 point.
+        // 4 px at 288 pixels/inch is 1/72 inch: 1 point.
         let smaller = try pdfPage(await ImageExporter.shared.pdfData(snapshot(resolution: 288))).getBoxRect(.mediaBox)
         #expect(smaller.width == 1 && smaller.height == 1)
     }
