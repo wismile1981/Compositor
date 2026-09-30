@@ -63,6 +63,8 @@ final class ProjectController {
 
     /// A layered Photoshop copy for handing the work on. The project stays the working file: Photoshop can't hold
     /// everything Compositor does, so what it can't is flattened or left out, and listed afterwards.
+    private static let psdKeepsTextKey = "psdKeepsTextEditable"
+
     func exportPSD() async {
         guard session.document != nil, begin() else { return }
         defer { session.isProjectBusy = false }
@@ -72,6 +74,10 @@ final class ProjectController {
         panel.canCreateDirectories = true
         panel.isExtensionHidden = false
         panel.title = "Export Photoshop"
+        let keepText = NSButton(checkboxWithTitle: "Keep text editable in Photoshop", target: nil, action: nil)
+        keepText.state = (UserDefaults.standard.object(forKey: Self.psdKeepsTextKey) as? Bool ?? true) ? .on : .off
+        keepText.sizeToFit()
+        panel.accessoryView = keepText
         panel.nameFieldStringValue = (session.projectURL?.deletingPathExtension().lastPathComponent ?? "Untitled") + ".psd"
         let response: NSApplication.ModalResponse
         if let window { response = await panel.beginSheetModal(for: window) }
@@ -79,8 +85,11 @@ final class ProjectController {
         guard response == .OK, let url = panel.url else { return }
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        let keepsText = keepText.state == .on
+        UserDefaults.standard.set(keepsText, forKey: Self.psdKeepsTextKey)
         do {
-            let exported = try await ImageExporter.shared.psd(snapshot)
+            let layouts = keepsText ? PSDTextWriter.layouts(for: snapshot) : [:]
+            let exported = try await ImageExporter.shared.psd(snapshot, textLayouts: layouts)
             try await ImageExporter.shared.write(exported.data, to: url)
             if !exported.notes.isEmpty { await showConversions(exported.notes) }
         } catch { await showError("Couldn’t export Photoshop file", error: error) }

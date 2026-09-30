@@ -178,4 +178,95 @@ struct PSDExportTests {
                                                              activeLayerID: nil, layers: []), images: [:])
         await #expect(throws: (any Error).self) { try await ImageExporter.shared.psd(huge) }
     }
+
+    // MARK: Text
+
+    private func textSnapshot(_ style: LayerTextStyle, origin: CGPoint, rotation: CGFloat = 0,
+                              stretch: CGFloat = 1, aspect: CGFloat = 1) throws -> (snapshot: ProjectSnapshot, id: UUID) {
+        let image = try EditorSession.textImage(style)
+        let id = UUID()
+        var layer = record(id, "Text", origin: origin,
+                           size: CGSize(width: CGFloat(image.width) * stretch * aspect, height: CGFloat(image.height) * stretch),
+                           rotation: rotation)
+        layer.text = style
+        var manifest = ProjectManifest(documentID: UUID(), width: 800, height: 600, activeLayerID: id, layers: [layer])
+        manifest.resolution = 72
+        return (ProjectSnapshot(manifest: manifest, images: [id: asset(image, "Text")]), id)
+    }
+
+    private func exportText(_ snapshot: ProjectSnapshot, editable: Bool = true) async throws -> (document: PSDDocument, notes: [PSDConversion]) {
+        let layouts = editable ? PSDTextWriter.layouts(for: snapshot) : [:]
+        let exported = try await ImageExporter.shared.psd(snapshot, textLayouts: layouts)
+        return (try PSDReader.read(exported.data), exported.notes)
+    }
+
+    private func near(_ a: CGFloat, _ b: CGFloat, _ tolerance: CGFloat = 1.5) -> Bool { abs(a - b) <= tolerance }
+
+    @Test func textStaysEditableAndComesBackWhereItWas() async throws {
+        var style = LayerTextStyle()
+        style.content = "Hello 你好\nSecond (line)"
+        style.fontSize = 40
+        style.red = 0.2; style.green = 0.4; style.blue = 0.6
+        style.alignment = .center
+        style.tracking = 20
+        style.leading = 60
+        let (snapshot, _) = try textSnapshot(style, origin: CGPoint(x: 30, y: 20))
+        let (document, notes) = try await exportText(snapshot)
+        #expect(notes.isEmpty)
+        let source = try #require(document.layers.first?.text)
+        #expect(source.style.content == style.content)
+        #expect(source.style.fontName == style.fontName)
+        #expect(near(source.style.fontSize, 40, 0.01))
+        #expect(near(source.style.red, 0.2, 0.01) && near(source.style.green, 0.4, 0.01) && near(source.style.blue, 0.6, 0.01))
+        #expect(source.style.alignment == .center)
+        #expect(near(source.style.tracking, 20, 0.05))
+        #expect(near(source.style.leading, 60, 0.05))
+        #expect(source.notes.isEmpty)
+        let placed = try PSDText.render(source).transform
+        #expect(near(placed.origin.x, 30) && near(placed.origin.y, 20))
+    }
+
+    @Test func paragraphBoxesKeepTheirFrame() async throws {
+        var style = LayerTextStyle()
+        style.content = "Short"
+        style.fontSize = 30
+        style.boxSize = CGSize(width: 300, height: 200)
+        let (snapshot, _) = try textSnapshot(style, origin: CGPoint(x: 50, y: 40))
+        let (document, _) = try await exportText(snapshot)
+        let source = try #require(document.layers.first?.text)
+        let box = try #require(source.style.boxSize)
+        #expect(near(box.width, 300) && near(box.height, 200))
+        let placed = try PSDText.render(source).transform
+        #expect(near(placed.origin.x, 50) && near(placed.origin.y, 40))
+    }
+
+    @Test func turnedAndScaledTextKeepsItsAngleAndSize() async throws {
+        var style = LayerTextStyle()
+        style.content = "Turned"
+        style.fontSize = 36
+        let turned = try textSnapshot(style, origin: CGPoint(x: 200, y: 100), rotation: 30)
+        let (document, _) = try await exportText(turned.snapshot)
+        let source = try #require(document.layers.first?.text)
+        let placed = try PSDText.render(source).transform
+        #expect(near(placed.rotation, 30, 0.1))
+        #expect(near(placed.origin.x, 200, 2) && near(placed.origin.y, 100, 2))
+        let doubled = try textSnapshot(style, origin: CGPoint(x: 200, y: 100), stretch: 2)
+        let (larger, _) = try await exportText(doubled.snapshot)
+        #expect(near(try #require(larger.layers.first?.text).style.fontSize, 72, 0.01))
+    }
+
+    @Test func textWithoutMeasurementsOrWithUnevenScaleIsWrittenAsPixels() async throws {
+        var style = LayerTextStyle()
+        style.content = "Flat"
+        let plain = try textSnapshot(style, origin: .zero)
+        let (unmeasured, notes) = try await exportText(plain.snapshot, editable: false)
+        #expect(unmeasured.layers.first?.text == nil)
+        #expect(notes.map(\.layerName) == ["Text"])
+        let stretched = try textSnapshot(style, origin: .zero, aspect: 2)
+        let (uneven, unevenNotes) = try await exportText(stretched.snapshot)
+        #expect(uneven.layers.first?.text == nil)
+        #expect(unevenNotes.map(\.layerName) == ["Text"])
+        // Either way the pixels are there.
+        #expect(uneven.layers.first?.image != nil)
+    }
 }

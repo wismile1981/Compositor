@@ -12,7 +12,9 @@ nonisolated struct PSDExport: @unchecked Sendable {
 /// mode, opacity, visibility, folders, masks and clipping carry over as Photoshop's own; what has no equivalent
 /// (layer effects, adjustment layers, live masks, editable text) is flattened or left out, and reported.
 nonisolated enum PSDExporter {
-    static func export(_ snapshot: ProjectSnapshot, composite: ExportRaster) throws -> PSDExport {
+    /// `textLayouts` holds the measurements (`PSDTextWriter.layouts`) that keep text layers editable in Photoshop; without
+    /// them text is written as pixels.
+    static func export(_ snapshot: ProjectSnapshot, composite: ExportRaster, textLayouts: [UUID: PSDTextLayout] = [:]) throws -> PSDExport {
         let width = snapshot.manifest.width, height = snapshot.manifest.height
         guard (1...PSDWriter.maxSide).contains(width), (1...PSDWriter.maxSide).contains(height) else { throw ExportError.tooLarge }
         let records = snapshot.manifest.layers
@@ -57,7 +59,6 @@ nonisolated enum PSDExporter {
                                         isVisible: record.isVisible)
             layer.blocks = [PSDWriter.unicodeNameBlock(record.name)]
             guard let asset = snapshot.images[record.id] else { return layer }
-            if record.text != nil { note(record, "Text was rasterized. It can’t be edited in Photoshop.") }
             let mask = snapshot.mask(for: record)
             var source = asset.image
             var transform = record.transform
@@ -70,6 +71,14 @@ nonisolated enum PSDExporter {
                 transform = LayerEffectsRenderer.placed(record.transform, image: effects.image, inset: effects.inset)
                 exportsMask = false
                 note(record, "Layer effects\(mask?.isEnabled == true ? " and the layer mask" : "") were merged into the layer’s pixels.")
+            }
+            if let style = record.text {
+                let merged = source !== asset.image
+                if !merged, let block = editableText(style, record: record, image: asset.image, layout: textLayouts[record.id]) {
+                    layer.blocks.append(block)
+                } else {
+                    note(record, "Text was written as pixels. It can’t be edited in Photoshop.")
+                }
             }
             let rect = bounds(of: transform, in: canvas)
             guard let rect else { return layer }
@@ -123,6 +132,22 @@ nonisolated enum PSDExporter {
         return PSDExport(data: data, notes: notes)
     }
 
+    /// The `TySh` block that keeps a text layer editable. Photoshop text has one uniform scale and no mirroring, so a
+    /// layer stretched unevenly or flipped stays pixels.
+    private static func editableText(_ style: LayerTextStyle, record: ProjectLayerRecord, image: CGImage,
+                                     layout: PSDTextLayout?) -> (key: String, payload: Data)? {
+        guard let layout, style.isValid, !record.transform.flipX, !record.transform.flipY,
+              image.width > 0, image.height > 0 else { return nil }
+        let scaleX = Double(record.transform.size.width) / Double(image.width)
+        let scaleY = Double(record.transform.size.height) / Double(image.height)
+        guard scaleX > 0, scaleY > 0, abs(scaleX - scaleY) <= 0.01 * max(scaleX, scaleY) else { return nil }
+        let anchor = record.transform.point(CGPoint(x: layout.anchor.x / CGFloat(image.width),
+                                                    y: layout.anchor.y / CGFloat(image.height)))
+        let payload = PSDTextWriter.tySh(style: style, scale: scaleX, rotation: Double(record.transform.rotation),
+                                         documentAnchor: anchor, layout: layout)
+        return (key: "TySh", payload: payload)
+    }
+
     /// Where a layer's transformed rectangle lands on the canvas, in whole pixels; nil when none of it does.
     static func bounds(of transform: LayerTransform, in canvas: CGRect) -> CGRect? {
         let corners = [CGPoint(x: 0, y: 0), CGPoint(x: 1, y: 0), CGPoint(x: 1, y: 1), CGPoint(x: 0, y: 1)].map(transform.point)
@@ -157,8 +182,8 @@ nonisolated enum PSDExporter {
 }
 
 extension ImageExporter {
-    func psd(_ snapshot: ProjectSnapshot) throws -> PSDExport {
+    func psd(_ snapshot: ProjectSnapshot, textLayouts: [UUID: PSDTextLayout] = [:]) throws -> PSDExport {
         let raster = try render(snapshot)
-        return try PSDExporter.export(snapshot, composite: raster)
+        return try PSDExporter.export(snapshot, composite: raster, textLayouts: textLayouts)
     }
 }
