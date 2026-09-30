@@ -63,6 +63,26 @@ final class ProjectController {
 
     /// A layered Photoshop copy for handing the work on. The project stays the working file: Photoshop can't hold
     /// everything Compositor does, so what it can't is flattened or left out, and listed afterwards.
+    func exportPDF() async {
+        guard session.document != nil, begin() else { return }
+        defer { session.isProjectBusy = false }
+        guard let snapshot = session.projectSnapshot() else { return }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.pdf]
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        panel.title = "Export PDF"
+        panel.nameFieldStringValue = (session.projectURL?.deletingPathExtension().lastPathComponent ?? "Untitled") + ".pdf"
+        let response: NSApplication.ModalResponse
+        if let window { response = await panel.beginSheetModal(for: window) }
+        else { response = await panel.begin() }
+        guard response == .OK, let url = panel.url else { return }
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        do { try await ImageExporter.shared.exportPDF(snapshot, to: url) }
+        catch { await showError("Couldn’t export PDF", error: error) }
+    }
+
     private static let psdKeepsTextKey = "psdKeepsTextEditable"
 
     func exportPSD() async {

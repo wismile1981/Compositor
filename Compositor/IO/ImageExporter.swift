@@ -150,6 +150,34 @@ actor ImageExporter {
         }
     }
 
+    /// Acrobat and most viewers refuse pages past 200 inches.
+    static let maxPDFPoints: CGFloat = 14_400
+
+    /// One page holding the flattened image at full resolution. The page is as large as the image prints at the
+    /// document's resolution (a 3000 px canvas at 300 pixels/inch is 10 inches), or smaller to stay under the
+    /// viewers' page limit; the pixels are never resampled.
+    func pdfData(_ snapshot: ProjectSnapshot) throws -> Data {
+        let raster = try render(snapshot)
+        let image = raster.image
+        var scale = 72 / max(1, raster.resolution)
+        let longSide = CGFloat(max(image.width, image.height)) * scale
+        if longSide > Self.maxPDFPoints { scale *= Self.maxPDFPoints / longSide }
+        var box = CGRect(x: 0, y: 0, width: CGFloat(image.width) * scale, height: CGFloat(image.height) * scale)
+        let data = NSMutableData()
+        guard let consumer = CGDataConsumer(data: data),
+              let context = CGContext(consumer: consumer, mediaBox: &box,
+                                      [kCGPDFContextCreator as String: "Compositor"] as CFDictionary) else { throw ExportError.encode }
+        context.beginPDFPage(nil)
+        context.draw(image, in: box)
+        context.endPDFPage()
+        context.closePDF()
+        return data as Data
+    }
+
+    func exportPDF(_ snapshot: ProjectSnapshot, to url: URL) throws {
+        try write(try pdfData(snapshot), to: url)
+    }
+
     func exportPNG(_ snapshot: ProjectSnapshot, to url: URL) throws {
         let data = try pngData(snapshot)
         try write(data, to: url)

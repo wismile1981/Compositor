@@ -85,6 +85,8 @@ struct CompositorApp: App {
                         .disabled(session.document == nil || !applicationDelegate.projects.canStart)
                     Button("Export Photoshop (PSD)…") { Task { await applicationDelegate.projects.exportPSD() } }
                         .disabled(session.document == nil || !applicationDelegate.projects.canStart)
+                    Button("Export PDF…") { Task { await applicationDelegate.projects.exportPDF() } }
+                        .disabled(session.document == nil || !applicationDelegate.projects.canStart)
                     Divider()
                     Button("Close Project") {
                         if let window = applicationDelegate.projects.window {
